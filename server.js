@@ -5,11 +5,6 @@ const http = require("http");
 const server = http.createServer();
 const wss = new WebSocket.Server({ server });
 
-// Heartbeat interval (30 seconds)
-const HEARTBEAT_INTERVAL = 30000;
-// Timeout for client response (5 seconds)
-const CLIENT_TIMEOUT = 5000;
-
 // Store active connections
 const clients = new Map();
 
@@ -43,32 +38,50 @@ wss.on("connection", (ws) => {
     heartbeatInterval = setInterval(() => {
       if (ws.readyState === WebSocket.OPEN) {
         try {
-          ws.ping();
+          const pingMessage = JSON.stringify({
+            type: 'ping',
+            timestamp: Date.now()
+          });
+          ws.send(pingMessage);
+          
           // Set timeout for client response
           timeout = setTimeout(() => {
             console.log("Client timeout - no response to ping");
             handleError(new Error("Client timeout"), ws);
-          }, CLIENT_TIMEOUT);
+          }, 5000); // 5 second timeout
         } catch (error) {
           handleError(error, ws);
         }
       }
-    }, HEARTBEAT_INTERVAL);
+    }, 30000); // 30 second interval
   };
-
-  // Respond to pong
-  ws.on("pong", () => {
-    console.log("Received pong from client");
-    clearTimeout(timeout);
-  });
 
   // Handle messages
   ws.on("message", (message) => {
     try {
+      const data = JSON.parse(message);
+      
+      // Handle ping messages from client
+      if (data.type === 'ping') {
+        console.log("Received ping from client");
+        clearTimeout(timeout);
+        
+        // Send pong response
+        const pongMessage = JSON.stringify({
+          type: 'pong',
+          timestamp: data.timestamp
+        });
+        ws.send(pongMessage);
+        return;
+      }
+      
+      // Handle regular messages
       console.log(`Received: ${message}`);
       ws.send(`Echo: ${message}`);
     } catch (error) {
-      handleError(error, ws);
+      // Not JSON or other error, treat as regular message
+      console.log(`Received: ${message}`);
+      ws.send(`Echo: ${message}`);
     }
   });
 
