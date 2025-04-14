@@ -13,7 +13,14 @@ const WebSocketManager = () => {
     lastPingTime: null,
     connectionTime: null,
     reconnectAttempts: 0,
-    totalReconnects: 0
+    totalReconnects: 0,
+    heartbeatStats: {
+      sent: 0,
+      received: 0,
+      failed: 0,
+      avgLatency: 0,
+      lastLatency: 0
+    }
   });
   const [connectionDetails, setConnectionDetails] = useState({
     protocol: '',
@@ -26,17 +33,22 @@ const WebSocketManager = () => {
   const [offlineQueue, setOfflineQueue] = useState([]);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
   const [connectionHealth, setConnectionHealth] = useState('good'); // good, fair, poor
+  const [heartbeatInterval, setHeartbeatInterval] = useState(30000); // 30 seconds
   
   const messagesEndRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
   const pingTimeoutRef = useRef(null);
   const healthCheckIntervalRef = useRef(null);
+  const heartbeatHistoryRef = useRef([]);
   
   const maxReconnectAttempts = 10;
   const initialReconnectDelay = 1000; // 1 second
   const maxReconnectDelay = 30000; // 30 seconds
-  const healthCheckInterval = 30000; // 30 seconds
+  const initialHeartbeatInterval = 30000; // 30 seconds
+  const minHeartbeatInterval = 10000; // 10 seconds
+  const maxHeartbeatInterval = 60000; // 60 seconds
   const pingTimeout = 5000; // 5 seconds
+  const heartbeatHistorySize = 10; // Keep track of last 10 heartbeats
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -98,6 +110,33 @@ const WebSocketManager = () => {
     return Math.max(1000, exponentialDelay + jitter);
   };
 
+  const updateHeartbeatInterval = (latency) => {
+    // Adjust heartbeat interval based on latency
+    // If latency is good, we can reduce frequency
+    // If latency is poor, we should increase frequency
+    let newInterval = heartbeatInterval;
+    
+    if (latency < 100) {
+      // Good latency, can reduce frequency
+      newInterval = Math.min(heartbeatInterval * 1.2, maxHeartbeatInterval);
+    } else if (latency > 500) {
+      // Poor latency, increase frequency
+      newInterval = Math.max(heartbeatInterval * 0.8, minHeartbeatInterval);
+    }
+    
+    // Only update if there's a significant change
+    if (Math.abs(newInterval - heartbeatInterval) > 5000) {
+      console.log(`Adjusting heartbeat interval from ${heartbeatInterval}ms to ${newInterval}ms`);
+      setHeartbeatInterval(newInterval);
+      
+      // Restart the health check with the new interval
+      if (healthCheckIntervalRef.current) {
+        clearInterval(healthCheckIntervalRef.current);
+        startHealthCheck();
+      }
+    }
+  };
+
   const startHealthCheck = () => {
     if (healthCheckIntervalRef.current) {
       clearInterval(healthCheckIntervalRef.current);
@@ -110,6 +149,15 @@ const WebSocketManager = () => {
         // Send ping
         ws.send(JSON.stringify({ type: 'ping', timestamp: startTime }));
         
+        // Update stats
+        setConnectionStats(prev => ({
+          ...prev,
+          heartbeatStats: {
+            ...prev.heartbeatStats,
+            sent: prev.heartbeatStats.sent + 1
+          }
+        }));
+        
         // Set timeout for pong response
         if (pingTimeoutRef.current) {
           clearTimeout(pingTimeoutRef.current);
@@ -119,10 +167,32 @@ const WebSocketManager = () => {
           console.log('Ping timeout - connection may be unstable');
           setConnectionHealth('poor');
           setError('Connection health check failed. Reconnecting...');
+          
+          // Update stats
+          setConnectionStats(prev => ({
+            ...prev,
+            heartbeatStats: {
+              ...prev.heartbeatStats,
+              failed: prev.heartbeatStats.failed + 1
+            }
+          }));
+          
+          // Add to history
+          heartbeatHistoryRef.current.push({
+            timestamp: new Date(),
+            success: false,
+            latency: null
+          });
+          
+          // Trim history if needed
+          if (heartbeatHistoryRef.current.length > heartbeatHistorySize) {
+            heartbeatHistoryRef.current.shift();
+          }
+          
           ws.close();
         }, pingTimeout);
       }
-    }, healthCheckInterval);
+    }, heartbeatInterval);
   };
 
   const handlePong = (latency) => {
@@ -139,10 +209,42 @@ const WebSocketManager = () => {
       setConnectionHealth('poor');
     }
     
+    // Update connection details
     setConnectionDetails(prev => ({
       ...prev,
       latency: `${latency}ms`
     }));
+    
+    // Update heartbeat stats
+    setConnectionStats(prev => {
+      const newStats = {
+        ...prev,
+        heartbeatStats: {
+          ...prev.heartbeatStats,
+          received: prev.heartbeatStats.received + 1,
+          lastLatency: latency,
+          avgLatency: (prev.heartbeatStats.avgLatency * prev.heartbeatStats.received + latency) / 
+                      (prev.heartbeatStats.received + 1)
+        }
+      };
+      
+      // Add to history
+      heartbeatHistoryRef.current.push({
+        timestamp: new Date(),
+        success: true,
+        latency: latency
+      });
+      
+      // Trim history if needed
+      if (heartbeatHistoryRef.current.length > heartbeatHistorySize) {
+        heartbeatHistoryRef.current.shift();
+      }
+      
+      return newStats;
+    });
+    
+    // Adjust heartbeat interval based on latency
+    updateHeartbeatInterval(latency);
   };
 
   const connectWebSocket = useCallback(() => {
@@ -171,8 +273,21 @@ const WebSocketManager = () => {
       setConnectionStats(prev => ({
         ...prev,
         connectionTime: new Date().toLocaleTimeString(),
-        reconnectAttempts: 0
+        reconnectAttempts: 0,
+        heartbeatStats: {
+          sent: 0,
+          received: 0,
+          failed: 0,
+          avgLatency: 0,
+          lastLatency: 0
+        }
       }));
+
+      // Reset heartbeat interval to initial value
+      setHeartbeatInterval(initialHeartbeatInterval);
+      
+      // Clear heartbeat history
+      heartbeatHistoryRef.current = [];
 
       // Start health check
       startHealthCheck();
@@ -258,7 +373,7 @@ const WebSocketManager = () => {
     };
 
     setWs(websocket);
-  }, [reconnectAttempts, offlineQueue]);
+  }, [reconnectAttempts, offlineQueue, heartbeatInterval]);
 
   useEffect(() => {
     connectWebSocket();
@@ -323,6 +438,12 @@ const WebSocketManager = () => {
     connectWebSocket();
   };
 
+  const getHeartbeatSuccessRate = () => {
+    const stats = connectionStats.heartbeatStats;
+    if (stats.sent === 0) return 0;
+    return Math.round((stats.received / stats.sent) * 100);
+  };
+
   return (
     <div className="websocket-manager">
       <div className="connection-status">
@@ -369,6 +490,28 @@ const WebSocketManager = () => {
           <div className="stat-item">
             <span className="stat-label">Reconnection Attempts:</span>
             <span className="stat-value">{connectionStats.reconnectAttempts}</span>
+          </div>
+        </div>
+        
+        <div className="heartbeat-stats">
+          <h3>Heartbeat Statistics</h3>
+          <div className="heartbeat-grid">
+            <div className="heartbeat-item">
+              <span className="heartbeat-label">Interval:</span>
+              <span className="heartbeat-value">{Math.round(heartbeatInterval / 1000)}s</span>
+            </div>
+            <div className="heartbeat-item">
+              <span className="heartbeat-label">Success Rate:</span>
+              <span className="heartbeat-value">{getHeartbeatSuccessRate()}%</span>
+            </div>
+            <div className="heartbeat-item">
+              <span className="heartbeat-label">Avg Latency:</span>
+              <span className="heartbeat-value">{Math.round(connectionStats.heartbeatStats.avgLatency)}ms</span>
+            </div>
+            <div className="heartbeat-item">
+              <span className="heartbeat-label">Last Latency:</span>
+              <span className="heartbeat-value">{connectionStats.heartbeatStats.lastLatency}ms</span>
+            </div>
           </div>
         </div>
         
