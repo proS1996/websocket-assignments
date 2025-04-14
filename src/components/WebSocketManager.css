@@ -8,6 +8,10 @@
 .connection-status {
   margin-bottom: 20px;
   text-align: center;
+  background-color: #f8f9fa;
+  padding: 20px;
+  border-radius: 8px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
 .status-indicator {
@@ -16,22 +20,55 @@
   border-radius: 4px;
   font-weight: bold;
   margin-top: 10px;
+  transition: all 0.3s ease;
 }
 
 .status-indicator.connected {
   background-color: #4caf50;
   color: white;
+  box-shadow: 0 0 10px rgba(76, 175, 80, 0.5);
 }
 
 .status-indicator.disconnected {
   background-color: #f44336;
   color: white;
+  box-shadow: 0 0 10px rgba(244, 67, 54, 0.5);
 }
 
 .error-message {
   color: #f44336;
   margin-top: 10px;
   font-weight: bold;
+  padding: 10px;
+  background-color: #ffebee;
+  border-radius: 4px;
+}
+
+.connection-details, .connection-stats {
+  margin-top: 20px;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 15px;
+  text-align: left;
+}
+
+.detail-item, .stat-item {
+  background-color: white;
+  padding: 10px;
+  border-radius: 4px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.detail-label, .stat-label {
+  font-weight: bold;
+  color: #666;
+  display: block;
+  margin-bottom: 5px;
+}
+
+.detail-value, .stat-value {
+  color: #333;
+  font-size: 1.1em;
 }
 
 .message-container {
@@ -42,6 +79,7 @@
   padding: 10px;
   margin-bottom: 20px;
   background-color: #f9f9f9;
+  box-shadow: inset 0 1px 3px rgba(0, 0, 0, 0.1);
 }
 
 .messages {
@@ -55,21 +93,33 @@
   border-radius: 4px;
   max-width: 70%;
   word-wrap: break-word;
+  animation: fadeIn 0.3s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
 }
 
 .message.sent {
   background-color: #e3f2fd;
   align-self: flex-end;
+  border-bottom-right-radius: 0;
 }
 
 .message.received {
   background-color: #f1f1f1;
   align-self: flex-start;
+  border-bottom-left-radius: 0;
 }
 
 .input-container {
   display: flex;
   gap: 10px;
+  background-color: white;
+  padding: 10px;
+  border-radius: 4px;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
 
 .input-container input {
@@ -78,6 +128,12 @@
   border: 1px solid #ddd;
   border-radius: 4px;
   font-size: 16px;
+  transition: border-color 0.3s;
+}
+
+.input-container input:focus {
+  outline: none;
+  border-color: #2196f3;
 }
 
 .input-container input:disabled {
@@ -93,14 +149,16 @@
   border-radius: 4px;
   cursor: pointer;
   font-size: 16px;
-  transition: background-color 0.3s;
+  transition: all 0.3s;
 }
 
 .input-container button:hover {
   background-color: #1976d2;
+  transform: translateY(-1px);
 }
 
 .input-container button:disabled {
   background-color: #bdbdbd;
   cursor: not-allowed;
+  transform: none;
 } 
