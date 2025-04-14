@@ -11,22 +11,32 @@ const WebSocketManager = () => {
     messagesSent: 0,
     messagesReceived: 0,
     lastPingTime: null,
-    connectionTime: null
+    connectionTime: null,
+    reconnectAttempts: 0,
+    totalReconnects: 0
   });
   const [connectionDetails, setConnectionDetails] = useState({
     protocol: '',
     url: '',
-    timestamp: null
+    timestamp: null,
+    latency: null
   });
   const [isReconnecting, setIsReconnecting] = useState(false);
   const [reconnectAttempts, setReconnectAttempts] = useState(0);
   const [offlineQueue, setOfflineQueue] = useState([]);
   const [isOnline, setIsOnline] = useState(navigator.onLine);
+  const [connectionHealth, setConnectionHealth] = useState('good'); // good, fair, poor
   
   const messagesEndRef = useRef(null);
   const reconnectTimeoutRef = useRef(null);
-  const maxReconnectAttempts = 5;
-  const reconnectDelay = 3000; // 3 seconds
+  const pingTimeoutRef = useRef(null);
+  const healthCheckIntervalRef = useRef(null);
+  
+  const maxReconnectAttempts = 10;
+  const initialReconnectDelay = 1000; // 1 second
+  const maxReconnectDelay = 30000; // 30 seconds
+  const healthCheckInterval = 30000; // 30 seconds
+  const pingTimeout = 5000; // 5 seconds
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -50,6 +60,7 @@ const WebSocketManager = () => {
       console.log('Browser is offline');
       setIsOnline(false);
       setError('You are offline. Messages will be queued.');
+      clearAllTimers();
     };
 
     window.addEventListener('online', handleOnline);
@@ -60,6 +71,79 @@ const WebSocketManager = () => {
       window.removeEventListener('offline', handleOffline);
     };
   }, [isConnected, isReconnecting]);
+
+  const clearAllTimers = () => {
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
+    if (pingTimeoutRef.current) {
+      clearTimeout(pingTimeoutRef.current);
+      pingTimeoutRef.current = null;
+    }
+    if (healthCheckIntervalRef.current) {
+      clearInterval(healthCheckIntervalRef.current);
+      healthCheckIntervalRef.current = null;
+    }
+  };
+
+  const calculateReconnectDelay = () => {
+    // Exponential backoff with jitter
+    const exponentialDelay = Math.min(
+      initialReconnectDelay * Math.pow(2, reconnectAttempts),
+      maxReconnectDelay
+    );
+    // Add jitter (±20%) to prevent thundering herd problem
+    const jitter = exponentialDelay * 0.2 * (Math.random() * 2 - 1);
+    return Math.max(1000, exponentialDelay + jitter);
+  };
+
+  const startHealthCheck = () => {
+    if (healthCheckIntervalRef.current) {
+      clearInterval(healthCheckIntervalRef.current);
+    }
+
+    healthCheckIntervalRef.current = setInterval(() => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        const startTime = Date.now();
+        
+        // Send ping
+        ws.send(JSON.stringify({ type: 'ping', timestamp: startTime }));
+        
+        // Set timeout for pong response
+        if (pingTimeoutRef.current) {
+          clearTimeout(pingTimeoutRef.current);
+        }
+        
+        pingTimeoutRef.current = setTimeout(() => {
+          console.log('Ping timeout - connection may be unstable');
+          setConnectionHealth('poor');
+          setError('Connection health check failed. Reconnecting...');
+          ws.close();
+        }, pingTimeout);
+      }
+    }, healthCheckInterval);
+  };
+
+  const handlePong = (latency) => {
+    if (pingTimeoutRef.current) {
+      clearTimeout(pingTimeoutRef.current);
+    }
+    
+    // Update connection health based on latency
+    if (latency < 100) {
+      setConnectionHealth('good');
+    } else if (latency < 500) {
+      setConnectionHealth('fair');
+    } else {
+      setConnectionHealth('poor');
+    }
+    
+    setConnectionDetails(prev => ({
+      ...prev,
+      latency: `${latency}ms`
+    }));
+  };
 
   const connectWebSocket = useCallback(() => {
     if (!navigator.onLine) {
@@ -80,13 +164,18 @@ const WebSocketManager = () => {
       setConnectionDetails({
         protocol: websocket.protocol || 'No protocol',
         url: websocket.url,
-        timestamp: new Date().toLocaleTimeString()
+        timestamp: new Date().toLocaleTimeString(),
+        latency: null
       });
       
       setConnectionStats(prev => ({
         ...prev,
-        connectionTime: new Date().toLocaleTimeString()
+        connectionTime: new Date().toLocaleTimeString(),
+        reconnectAttempts: 0
       }));
+
+      // Start health check
+      startHealthCheck();
 
       // Process any queued messages
       if (offlineQueue.length > 0) {
@@ -104,27 +193,58 @@ const WebSocketManager = () => {
     };
 
     websocket.onmessage = (event) => {
-      console.log('Received message:', event.data);
-      setMessages(prev => [...prev, { text: event.data, type: 'received' }]);
-      setConnectionStats(prev => ({
-        ...prev,
-        messagesReceived: prev.messagesReceived + 1
-      }));
+      try {
+        const data = JSON.parse(event.data);
+        
+        if (data.type === 'pong') {
+          const latency = Date.now() - data.timestamp;
+          handlePong(latency);
+        } else {
+          console.log('Received message:', event.data);
+          setMessages(prev => [...prev, { text: event.data, type: 'received' }]);
+          setConnectionStats(prev => ({
+            ...prev,
+            messagesReceived: prev.messagesReceived + 1
+          }));
+        }
+      } catch (e) {
+        // Not JSON, treat as regular message
+        console.log('Received message:', event.data);
+        setMessages(prev => [...prev, { text: event.data, type: 'received' }]);
+        setConnectionStats(prev => ({
+          ...prev,
+          messagesReceived: prev.messagesReceived + 1
+        }));
+      }
     };
 
-    websocket.onclose = () => {
-      console.log('Disconnected from WebSocket server');
+    websocket.onclose = (event) => {
+      console.log('Disconnected from WebSocket server', event.code, event.reason);
       setIsConnected(false);
       setWs(null);
       
+      // Clear health check interval
+      if (healthCheckIntervalRef.current) {
+        clearInterval(healthCheckIntervalRef.current);
+        healthCheckIntervalRef.current = null;
+      }
+      
       // Attempt to reconnect if not manually closed and not offline
       if (navigator.onLine && reconnectAttempts < maxReconnectAttempts) {
-        setReconnectAttempts(prev => prev + 1);
-        setError(`Connection lost. Reconnecting (attempt ${reconnectAttempts + 1}/${maxReconnectAttempts})...`);
+        const newAttempts = reconnectAttempts + 1;
+        setReconnectAttempts(newAttempts);
+        setConnectionStats(prev => ({
+          ...prev,
+          reconnectAttempts: newAttempts,
+          totalReconnects: prev.totalReconnects + 1
+        }));
+        
+        const delay = calculateReconnectDelay();
+        setError(`Connection lost. Reconnecting in ${Math.round(delay/1000)}s (attempt ${newAttempts}/${maxReconnectAttempts})...`);
         
         reconnectTimeoutRef.current = setTimeout(() => {
           connectWebSocket();
-        }, reconnectDelay);
+        }, delay);
       } else if (reconnectAttempts >= maxReconnectAttempts) {
         setError('Maximum reconnection attempts reached. Please try again later.');
         setIsReconnecting(false);
@@ -143,11 +263,9 @@ const WebSocketManager = () => {
   useEffect(() => {
     connectWebSocket();
     return () => {
+      clearAllTimers();
       if (ws) {
         ws.close();
-      }
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
       }
     };
   }, [connectWebSocket]);
@@ -192,11 +310,24 @@ const WebSocketManager = () => {
     return 'Disconnected';
   };
 
+  const getConnectionHealthClass = () => {
+    if (!isConnected) return '';
+    return `health-${connectionHealth}`;
+  };
+
+  const handleManualReconnect = () => {
+    if (ws) {
+      ws.close();
+    }
+    setReconnectAttempts(0);
+    connectWebSocket();
+  };
+
   return (
     <div className="websocket-manager">
       <div className="connection-status">
         <h2>WebSocket Connection</h2>
-        <div className={`status-indicator ${isConnected ? 'connected' : isReconnecting ? 'reconnecting' : 'disconnected'}`}>
+        <div className={`status-indicator ${isConnected ? 'connected' : isReconnecting ? 'reconnecting' : 'disconnected'} ${getConnectionHealthClass()}`}>
           {getConnectionStatus()}
         </div>
         {error && <div className="error-message">{error}</div>}
@@ -214,6 +345,12 @@ const WebSocketManager = () => {
             <span className="detail-label">Connected at:</span>
             <span className="detail-value">{connectionDetails.timestamp || 'N/A'}</span>
           </div>
+          {connectionDetails.latency && (
+            <div className="detail-item">
+              <span className="detail-label">Latency:</span>
+              <span className="detail-value">{connectionDetails.latency}</span>
+            </div>
+          )}
         </div>
 
         <div className="connection-stats">
@@ -229,7 +366,21 @@ const WebSocketManager = () => {
             <span className="stat-label">Queued Messages:</span>
             <span className="stat-value">{offlineQueue.length}</span>
           </div>
+          <div className="stat-item">
+            <span className="stat-label">Reconnection Attempts:</span>
+            <span className="stat-value">{connectionStats.reconnectAttempts}</span>
+          </div>
         </div>
+        
+        {!isConnected && !isReconnecting && (
+          <button 
+            className="reconnect-button"
+            onClick={handleManualReconnect}
+            disabled={!navigator.onLine}
+          >
+            Reconnect Now
+          </button>
+        )}
       </div>
 
       <div className="message-container">
